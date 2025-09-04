@@ -1,0 +1,187 @@
+try:
+    import streamlit as st
+    from PyPDF2 import PdfReader
+    from transformers import pipeline
+    import random
+    from reportlab.platypus import SimpleDocTemplate, Paragraph
+    from reportlab.lib.styles import getSampleStyleSheet
+    from io import BytesIO
+except ModuleNotFoundError:
+    st.error("🚨 Missing packages! Run this in terminal:")
+    st.code("pip install streamlit PyPDF2 transformers reportlab")
+    st.stop()
+
+# --- Setup ---
+st.set_page_config(page_title="📚 StudyMate AI", layout="wide")
+st.title("📚 StudyMate AI Assistant")
+
+# --- Upload PDF ---
+uploaded_file = st.file_uploader("📂 Upload your PDF", type="pdf")
+
+# --- Sidebar Notes ---
+st.sidebar.header("📝 Your Notes")
+if "notes" not in st.session_state:
+    st.session_state.notes = ""
+user_notes = st.sidebar.text_area("Write your thoughts here...", value=st.session_state.notes, height=300)
+
+if st.sidebar.button("💾 Save Notes"):
+    st.session_state.notes = user_notes
+    st.sidebar.success("✅ Notes saved!")
+
+# Download Notes TXT
+st.sidebar.download_button(
+    "⬇ Download Notes as TXT",
+    data=st.session_state.notes,
+    file_name="notes.txt"
+)
+
+# Download Notes PDF
+pdf_buffer = BytesIO()
+doc = SimpleDocTemplate(pdf_buffer)
+styles = getSampleStyleSheet()
+story = [Paragraph(st.session_state.notes, styles["Normal"])]
+doc.build(story)
+pdf_value = pdf_buffer.getvalue()
+
+st.sidebar.download_button(
+    "⬇ Download Notes as PDF",
+    data=pdf_value,
+    file_name="notes.pdf",
+    mime="application/pdf"
+)
+
+# --- Process PDF ---
+if uploaded_file:
+    reader = PdfReader(uploaded_file)
+    full_text = ""
+    for page in reader.pages:
+        text = page.extract_text()
+        if text:
+            full_text += text + "\n"
+
+    st.success("✅ PDF uploaded and processed!")
+
+    # --- Mode Selection ---
+    mode = st.radio("Choose a mode:", ["Ask", "Summarise", "Quiz", "Chat"])
+
+    # --- Ask Mode ---
+    if mode == "Ask":
+        with st.form("ask_form"):
+            question = st.text_input("💬 Ask a question about the PDF:")
+            max_words = st.number_input("✍️ Expected answer length (in words):", min_value=10, max_value=500, value=50, step=10)
+            submitted = st.form_submit_button("🔍 Submit")
+
+        if submitted and question:
+            try:
+                with st.spinner("⏳ Processing your question... please wait"):
+                    qa_pipeline = pipeline("question-answering", model="distilbert-base-uncased-distilled-squad")
+
+                    context_size = 2000
+                    answer = ""
+                    while len(answer.split()) < max_words and context_size <= len(full_text):
+                        context = full_text[:context_size]
+                        result = qa_pipeline(question=question, context=context)
+                        answer = result['answer']
+                        context_size += 2000
+
+                    words = answer.split()
+                    if len(words) > max_words:
+                        answer = " ".join(words[:max_words])
+
+                st.markdown("### 🧠 Answer")
+                st.write(answer)
+
+            except Exception as e:
+                st.error("⚠ Could not generate an answer.")
+                st.code(str(e))
+
+    # --- Summarise Mode ---
+    elif mode == "Summarise":
+        with st.form("summ_form"):
+            max_words = st.number_input("📏 Desired summary length (in words):", min_value=30, max_value=500, value=100, step=10)
+            submitted = st.form_submit_button("📝 Summarise")
+
+        if submitted:
+            try:
+                with st.spinner("⏳ Summarising your PDF... please wait"):
+                    summarizer = pipeline("summarization", model="sshleifer/distilbart-cnn-12-6")
+
+                    chunk_size = 1000
+                    chunks = [full_text[i:i+chunk_size] for i in range(0, len(full_text), chunk_size)]
+                    summaries = []
+
+                    for chunk in chunks:
+                        if len(chunk.strip()) > 50:
+                            summary = summarizer(chunk, max_length=150, min_length=40, do_sample=False)[0]['summary_text']
+                            summaries.append(summary)
+
+                    final_summary = " ".join(summaries)
+                    words = final_summary.split()
+                    if len(words) > max_words:
+                        final_summary = " ".join(words[:max_words])
+
+                st.markdown("### 📝 Summary")
+                st.write(final_summary)
+
+            except Exception as e:
+                st.error("⚠ Could not summarize the document.")
+                st.code(str(e))
+
+    # --- Quiz Mode ---
+    elif mode == "Quiz":
+        st.markdown("### 🧪 Quiz Yourself")
+        sentences = [s for s in full_text.split(". ") if len(s.split()) > 8]
+
+        if "quiz_data" not in st.session_state:
+            questions = []
+            for i in range(min(5, len(sentences))):
+                sentence = random.choice(sentences)
+                words = sentence.split()
+                keyword = random.choice(words)
+                question = sentence.replace(keyword, "_____")
+                questions.append((question, keyword))
+            st.session_state.quiz_data = questions
+
+        score = 0
+        user_answers = []
+        for i, (q, a) in enumerate(st.session_state.quiz_data, 1):
+            user_input = st.text_input(f"Q{i}: {q}", key=f"quiz_{i}")
+            user_answers.append((user_input, a))
+
+        if st.button("✅ Check Answers"):
+            for i, (user_input, correct_answer) in enumerate(user_answers, 1):
+                if user_input.strip().lower() == correct_answer.strip().lower():
+                    st.success(f"Q{i}: Correct! ✅ ({correct_answer})")
+                    score += 1
+                else:
+                    st.error(f"Q{i}: Wrong ❌ (Correct: {correct_answer})")
+
+            st.info(f"🏆 Your Score: {score} / {len(user_answers)}")
+
+    # --- Chat Mode ---
+    elif mode == "Chat":
+        if "chat_history" not in st.session_state:
+            st.session_state.chat_history = []
+
+        user_message = st.text_input("💬 You:", key="chat_input")
+        if st.button("Send"):
+            if user_message:
+                try:
+                    with st.spinner("⏳ Thinking..."):
+                        qa_pipeline = pipeline("question-answering", model="distilbert-base-uncased-distilled-squad")
+                        context = full_text[:4000]
+                        result = qa_pipeline(question=user_message, context=context)
+                        bot_message = result['answer']
+
+                    st.session_state.chat_history.append(("You", user_message))
+                    st.session_state.chat_history.append(("AI", bot_message))
+                except Exception as e:
+                    st.error("⚠ Could not generate a reply.")
+                    st.code(str(e))
+
+        st.markdown("### 💬 Chat History")
+        for sender, msg in st.session_state.chat_history:
+            if sender == "You":
+                st.markdown(f"**🧑 {sender}:** {msg}")
+            else:
+                st.markdown(f"**🤖 {sender}:** {msg}")
